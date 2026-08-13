@@ -1,0 +1,4 @@
+# Mount the host plugin in any DSH profile that installs this bundle.
+- insert:
+    - id: codex-app-server-provider
+      name: codex-plugin-dsh
