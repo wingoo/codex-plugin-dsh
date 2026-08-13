@@ -56,8 +56,11 @@
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-sandbox": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-sandbox-policy": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-scope": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-sdk-protocol": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-timeout": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
