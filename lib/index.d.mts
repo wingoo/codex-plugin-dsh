@@ -4,7 +4,6 @@ import { Context } from "@deepseek-ai/cordis";
 //#region src/adapter.d.ts
 /** Provider route registered in the existing DSH model catalog. */
 declare const CODEX_APP_SERVER_PROVIDER = "codex-app-server";
-type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 /** Resolved process and timeout configuration owned by the plugin deployment. */
 interface AdapterConfig {
   readonly executable: string;
@@ -15,7 +14,6 @@ interface AdapterConfig {
   readonly disposeGraceMs: number;
   readonly stderrMaxBytes: number;
   readonly modelPageSize: number;
-  readonly fallbackSandbox: SandboxMode;
 }
 /** Local Codex App Server route with session-aware history, permissions, and process ownership. */
 declare class CodexAppServerAdapter extends LlmAdapter {
@@ -23,12 +21,21 @@ declare class CodexAppServerAdapter extends LlmAdapter {
   private readonly config;
   private cachedModels;
   private pendingModels;
+  private readonly activeTurns;
   constructor(ctx: Context, config: AdapterConfig);
   providerInfo(provider: string): LlmProviderInfo;
   listModels(provider: string): Promise<readonly LlmModelInfo[]>;
   resolveModel(provider: string, modelId: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
+  private startTurn;
+  private closeTurn;
+  private finishCloseTurn;
+  /** Close an unfinished App Server turn after the owning DSH turn ends. */
+  closeSession(sessionId: string): void;
+  /** Dispose every App Server process retained across DSH tool execution. */
+  dispose(): Promise<void>;
   private threadParams;
+  private isolationConfig;
   private models;
   private loadModels;
   private openConnection;
@@ -56,11 +63,9 @@ interface Config {
   stderrMaxBytes?: number;
   /** Number of models requested per App Server catalog page. */
   modelPageSize?: number;
-  /** Fail-safe sandbox used only when a Session has no recorded DSH sandbox mode. */
-  fallbackSandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 declare const Config: z<Config>;
-/** Register the adapter and remove DSH tool schemas only while its route is selected. */
+/** Register the adapter inside the existing DSH provider and session lifecycles. */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
 export { CODEX_APP_SERVER_PROVIDER, CodexAppServerAdapter, Config, apply, inject, name };

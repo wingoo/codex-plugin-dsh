@@ -2,12 +2,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import type {} from '@deepseek-ai/dsh-system-prompt'
-import type {} from '@deepseek-ai/dsh-user-approval'
 import {
   CODEX_APP_SERVER_PROVIDER,
   CodexAppServerAdapter,
@@ -15,7 +13,7 @@ import {
 } from './adapter.ts'
 
 export const name = 'codex-plugin-dsh'
-export const inject = ['llm', 'subprocess', 'sessions', 'agents', 'approval', 'systemPrompt']
+export const inject = ['llm', 'subprocess', 'sessions', 'attachments']
 
 /** Deployment configuration for the local Codex CLI process. */
 export interface Config {
@@ -35,8 +33,6 @@ export interface Config {
   stderrMaxBytes?: number
   /** Number of models requested per App Server catalog page. */
   modelPageSize?: number
-  /** Fail-safe sandbox used only when a Session has no recorded DSH sandbox mode. */
-  fallbackSandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'
 }
 
 export const Config: z<Config> = z.object({
@@ -48,7 +44,6 @@ export const Config: z<Config> = z.object({
   disposeGraceMs: z.number().default(3_000),
   stderrMaxBytes: z.number().default(16_384),
   modelPageSize: z.number().default(100),
-  fallbackSandbox: z.union(['read-only', 'workspace-write', 'danger-full-access'] as const).default('read-only'),
 })
 
 function resolvedConfig(config: Config): AdapterConfig {
@@ -78,19 +73,17 @@ function resolvedConfig(config: Config): AdapterConfig {
     disposeGraceMs: resolved.disposeGraceMs,
     stderrMaxBytes: resolved.stderrMaxBytes,
     modelPageSize: resolved.modelPageSize,
-    fallbackSandbox: resolved.fallbackSandbox,
   }
 }
 
-/** Register the adapter and remove DSH tool schemas only while its route is selected. */
+/** Register the adapter inside the existing DSH provider and session lifecycles. */
 export function apply(ctx: Context, config: Config): void {
   const adapter = new CodexAppServerAdapter(ctx, resolvedConfig(config))
   ctx.llm.registerAdapter([CODEX_APP_SERVER_PROVIDER], adapter)
-  ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
-    const assembled = await next()
-    if (assembled.variables.provider !== CODEX_APP_SERVER_PROVIDER) return assembled
-    return { ...assembled, tools: [] }
-  }, { global: true, prepend: true })
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'turn/end') adapter.closeSession(String(session.header.id))
+  })
+  ctx.effect(() => () => adapter.dispose(), 'codex-plugin-dsh: close active App Server turns')
 }
 
 export { CODEX_APP_SERVER_PROVIDER, CodexAppServerAdapter }

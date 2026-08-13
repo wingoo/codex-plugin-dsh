@@ -39,7 +39,7 @@
     "docs",
     "cordis.patch.yml",
     "README.md",
-    "README.zh.md",
+    "README.en.md",
     "LICENSE"
   ],
   "dsh": {
@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-attachment": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-sandbox": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-sandbox-policy": ">=0.1.0-rc.5 <0.2.0",

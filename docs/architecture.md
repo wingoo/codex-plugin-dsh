@@ -4,9 +4,15 @@
 
 ## Ownership
 
-DSH owns the persisted Session, selected route, workspace, approval surface, sandbox state, transcript, and managed subprocess lifecycle. Codex App Server owns model discovery, native account authentication, thread execution, and the internal coding-agent tool loop. The adapter translates only the data required to connect those two owners.
+DSH owns the persisted Session, selected route, prompt and tool assembly, outer Agent Loop, tool permissions and execution, transcript, and managed subprocess lifecycle. Codex App Server owns model discovery, native account authentication, thread context, model inference, and native image generation. The adapter translates provider messages and bridges App Server dynamic-tool requests back into the DSH loop.
 
 The built-in DSH `subagent-codex` package is a separate capability: it exposes Codex as a delegated one-shot subagent tool. This plugin exposes Codex App Server as the primary LLM route for an ordinary DSH Session.
+
+## Model routing
+
+The DSH Agent Loop constructs each generation request from the Session's selected provider and model, then sends it through `ctx.llm`. The LLM service selects the registered adapter; the loop does not contain a fixed DeepSeek or OpenAI HTTP call. With provider `codex-app-server`, this adapter sends local JSON-RPC over stdio to `codex app-server`. The App Server uses the Codex account managed by the CLI and performs its own backend requests.
+
+A DSH default model only supplies the initial Session selection. It is not a second upstream provider for a Session that has explicitly selected a Codex model.
 
 ## Model discovery
 
@@ -16,25 +22,27 @@ The successful catalog is cached for `modelCacheMs`. Discovery failures remain p
 
 ## Turn lifecycle
 
-For every DSH request, the adapter resolves the live Session and Agent from `sessionId`, reads the Session working directory, and derives sandbox and approval settings from logged Session state. It starts one managed App Server connection for the operation and closes the entire process tree in `finally`.
+For a new DSH model turn, the adapter resolves the live Session from `sessionId`, reads its working directory, and starts one managed App Server connection. The connection remains alive when App Server requests a DSH tool, so several DSH model steps can continue one App Server turn. A completed or aborted DSH turn, Session closure, plugin disposal, or timeout closes the process tree.
 
-A request without an App Server replay checkpoint starts a persistent thread. A request with a checkpoint calls `thread/fork` using the exact prior thread and turn IDs. This gives DSH forks and retries independent App Server branches while preserving Codex context reuse.
+A request without an App Server replay checkpoint starts a persistent thread and registers the exact DSH `options.tools` catalog as an experimental `dsh` dynamic-tool namespace. A request with a checkpoint and the same tool signature calls `thread/fork` using the prior thread and turn IDs; the persisted App Server catalog is inherited without retransmission. Codex CLI `0.147.0` cannot replace dynamic tools during `thread/fork` or `thread/resume`, so a changed signature starts a new thread and reimports the complete DSH history that App Server can represent.
 
-Completed history after the checkpoint is converted to Responses input items and inserted before the new turn. The current trailing user text becomes the `turn/start` input. Unsupported durable content fails before the turn starts so the model never receives an incomplete history.
+Completed history after the checkpoint is converted to Responses input items and inserted before the new turn. The current trailing user text and images become the `turn/start` input. Image references are verified through the DSH attachment service and encoded as inline data URLs, so App Server never depends on a DSH-local attachment path. Unsupported durable content fails before the turn starts, including a full rebuild that encounters reasoning or assistant images that cannot be imported losslessly.
 
-App Server agent-message notifications become DSH streaming text or reasoning blocks. A successful `turn/completed` notification produces a DSH stop finish plus replay state. Token-usage notifications are converted to DSH usage fields, including cached input and reasoning tokens.
+App Server agent-message notifications become DSH streaming text or reasoning blocks. Completed `imageGeneration` items are decoded, validated, and persisted through the DSH attachment service before becoming assistant image blocks. A successful `turn/completed` notification produces a DSH stop finish plus replay state. Token-usage notifications are converted to DSH usage fields, including cached input and reasoning tokens.
 
-## Tool-loop isolation
+## DSH tool-loop bridge
 
-A global prepended `system-prompt/assemble` waterfall listener first delegates to the remaining assembly chain. When the resolved provider is `codex-app-server`, it returns the completed assembly with an empty tool list. The adapter also rejects any request that still contains DSH tool schemas.
+The adapter accepts the exact `GenerateOptions.tools` list produced by DSH. It does not inspect `ctx.tools` or rebuild the catalog, so the model sees the same preset, scope, policy, and code-mode result that another DSH provider would receive.
 
-This preserves ordinary DSH prompt assembly and model-visible logging while making Codex App Server the only tool-loop owner for that route. Other providers receive the unmodified DSH tool catalog.
+An App Server `item/tool/call` request is held open. The adapter emits the call as a normal DSH tool-call block and finishes that provider step with `tool-calls`. The ordinary DSH Agent Loop logs the assistant message, validates and schedules the call through its Tool Runtime, applies permissions and hooks, and appends the correlated tool result. On the next provider step, the adapter locates that result, answers the pending JSON-RPC request, and continues consuming notifications from the same App Server turn.
 
-## Permissions
+DSH tool-result text and images map to App Server dynamic-tool output. Messages added by DSH after the tool result, including Tool Runtime `additionalContexts`, are sent with `turn/steer`. Multiple simultaneous App Server dynamic calls are serialized across DSH steps; no call is executed inside the adapter, and standard DSH tool events remain the only durable execution log.
 
-The DSH sandbox mode maps directly to the App Server thread sandbox. DSH `never` approval maps to App Server `never`; an interactive DSH policy maps to `on-request`.
+## App Server capability isolation
 
-App Server command, file-change, and permission approval requests call `ctx.approval.request` with the live DSH Agent. One-shot approval accepts the App Server action. Rejection and cancellation select a fail-closed decision supported by the request. MCP elicitation is declined, and unimplemented interactive user input fails explicitly.
+App Server runs with a read-only sandbox and `never` approval because environment actions belong to DSH Tool Runtime. Per-thread configuration disables shell, unified exec, Web search, multi-agent, Apps, Plugins, view-image, and every MCP server visible in the effective Codex configuration. Developer instructions restrict remaining action requests to the `dsh` namespace. Command, file-change, and permission approval requests fail closed if App Server still emits one.
+
+Native image generation remains enabled intentionally. Its completed image item is persisted through the DSH attachment service and exposed as an assistant image without entering the DSH tool loop. MCP elicitation is declined, and unimplemented interactive user input fails explicitly.
 
 ## Process portability
 

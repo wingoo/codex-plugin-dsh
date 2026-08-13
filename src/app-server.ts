@@ -16,6 +16,12 @@ export type AppServerRequestHandler = (
   params: Record<string, unknown>,
 ) => Promise<unknown>
 
+/** Synchronous connection observations used to preserve inbound wire ordering. */
+export interface AppServerConnectionObserver {
+  readonly notification: (notification: AppServerNotification) => void
+  readonly failure: (error: Error) => void
+}
+
 class NotificationQueue implements AsyncIterable<AppServerNotification> {
   private readonly values: AppServerNotification[] = []
   private readonly waiters: Array<PromiseWithResolvers<IteratorResult<AppServerNotification>>> = []
@@ -69,6 +75,7 @@ export class CodexAppServerConnection {
   constructor(
     private readonly child: SubprocessHandle,
     requestHandler: AppServerRequestHandler,
+    private readonly observer?: AppServerConnectionObserver,
   ) {
     if (child.stdout === undefined || child.stdin === undefined) {
       throw new Error('codex-plugin-dsh: App Server subprocess requires piped stdin and stdout')
@@ -76,17 +83,24 @@ export class CodexAppServerConnection {
     this.transport = new JsonRpcLineTransport(child.stdout, child.stdin)
     this.transport.onRequest(requestHandler)
     this.transport.onNotification((method, params) => {
-      this.queue.push({ method, params })
+      const notification = { method, params }
+      if (this.observer === undefined) this.queue.push(notification)
+      else this.observer.notification(notification)
     })
     void child.done.then(
       outcome => {
         if (this.closing) return
-        this.queue.fail(new Error(
+        const error = new Error(
           `codex-plugin-dsh: App Server exited unexpectedly (code ${String(outcome.exitCode)}, signal ${String(outcome.signal)})${this.stderrSuffix()}`,
-        ))
+        )
+        if (this.observer === undefined) this.queue.fail(error)
+        else this.observer.failure(error)
       },
       error => {
-        if (!this.closing) this.queue.fail(thrown(error))
+        if (this.closing) return
+        const failure = thrown(error)
+        if (this.observer === undefined) this.queue.fail(failure)
+        else this.observer.failure(failure)
       },
     )
   }

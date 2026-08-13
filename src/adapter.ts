@@ -2,7 +2,9 @@
 
 import { extname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
+  CallId,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -10,25 +12,32 @@ import {
   type LlmModelInfo,
   type LlmProviderInfo,
   type LlmResolvedModelInfo,
-  type Message,
+  type ModelModality,
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import { effectiveSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { effectiveApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CodexAppServerConnection, type AppServerNotification } from './app-server.ts'
+import {
+  CodexAppServerConnection,
+  type AppServerConnectionObserver,
+  type AppServerNotification,
+} from './app-server.ts'
 import { prepareCodexHistory, type CodexReplayState } from './history.ts'
-import { object, optionalString, string, thrown } from './validation.ts'
+import { attachmentDataUrl, generatedImageBlock } from './images.ts'
+import {
+  codexDynamicToolCall,
+  codexDynamicToolResult,
+  codexDynamicTools,
+  codexToolSignature,
+  type CodexDynamicToolCall,
+  type CodexToolImageUrlResolver,
+} from './tools.ts'
+import { object, string, thrown } from './validation.ts'
 
 /** Provider route registered in the existing DSH model catalog. */
 export const CODEX_APP_SERVER_PROVIDER = 'codex-app-server'
 
 const WINDOWS_EXECUTABLE_ENV = 'DSH_CODEX_APP_SERVER_EXECUTABLE'
-
-type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
-type ApprovalPolicy = 'ask' | 'never'
 
 /** Resolved process and timeout configuration owned by the plugin deployment. */
 export interface AdapterConfig {
@@ -40,7 +49,6 @@ export interface AdapterConfig {
   readonly disposeGraceMs: number
   readonly stderrMaxBytes: number
   readonly modelPageSize: number
-  readonly fallbackSandbox: SandboxMode
 }
 
 interface CatalogModel {
@@ -52,6 +60,7 @@ interface CatalogModel {
     readonly id: string
     readonly description?: string
   }[]
+  readonly inputModalities: readonly ModelModality[]
 }
 
 interface ActiveBlock {
@@ -60,6 +69,79 @@ interface ActiveBlock {
   phase: 'commentary' | 'final_answer' | null
   text: string
   ended: boolean
+}
+
+interface PendingDynamicToolCall {
+  readonly call: CodexDynamicToolCall
+  readonly response: PromiseWithResolvers<unknown>
+}
+
+type ActiveTurnEvent =
+  | { readonly kind: 'notification'; readonly notification: AppServerNotification }
+  | ({ readonly kind: 'dynamic-tool' } & PendingDynamicToolCall)
+
+class ActiveTurnQueue {
+  private readonly values: ActiveTurnEvent[] = []
+  private readonly waiters: Array<PromiseWithResolvers<ActiveTurnEvent>> = []
+  private terminal: Error | undefined
+
+  push(event: ActiveTurnEvent): void {
+    if (this.terminal !== undefined) {
+      if (event.kind === 'dynamic-tool') event.response.reject(this.terminal)
+      return
+    }
+    const waiter = this.waiters.shift()
+    if (waiter === undefined) this.values.push(event)
+    else waiter.resolve(event)
+  }
+
+  fail(error: Error): void {
+    if (this.terminal !== undefined) return
+    this.terminal = error
+    for (const event of this.values.splice(0)) {
+      if (event.kind === 'dynamic-tool') event.response.reject(error)
+    }
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error)
+  }
+
+  async next(signal: AbortSignal): Promise<ActiveTurnEvent> {
+    signal.throwIfAborted()
+    const value = this.values.shift()
+    if (value !== undefined) return value
+    if (this.terminal !== undefined) throw this.terminal
+    const waiter = Promise.withResolvers<ActiveTurnEvent>()
+    this.waiters.push(waiter)
+    const onAbort = (): void => { waiter.reject(abortError(signal)) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    try {
+      return await waiter.promise
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+      const index = this.waiters.indexOf(waiter)
+      if (index >= 0) this.waiters.splice(index, 1)
+    }
+  }
+}
+
+interface ActiveCodexTurn {
+  readonly sessionId: string
+  readonly model: string
+  readonly toolSignature: string
+  readonly connection: CodexAppServerConnection
+  readonly events: ActiveTurnQueue
+  readonly signal: AbortSignal
+  readonly threadId: string
+  readonly turnId: string
+  readonly replayState: CodexReplayState
+  readonly resolveImageUrl: CodexToolImageUrlResolver
+  readonly onAbort: () => void
+  readonly blocks: Map<string, ActiveBlock>
+  readonly completedImages: Set<string>
+  nextBlockIndex: number
+  finalOutput: boolean
+  usage?: TokenUsage
+  awaiting?: PendingDynamicToolCall
+  closing?: Promise<void>
 }
 
 /** Process invocation for one resolved Codex executable. */
@@ -112,23 +194,6 @@ function abortError(signal: AbortSignal): Error {
     : new Error(`codex-plugin-dsh: operation aborted: ${String(signal.reason)}`)
 }
 
-async function nextNotification(
-  iterator: AsyncIterator<AppServerNotification>,
-  signal: AbortSignal,
-): Promise<IteratorResult<AppServerNotification>> {
-  signal.throwIfAborted()
-  const pending = iterator.next()
-  let rejectAbort!: (error: Error) => void
-  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
-  const onAbort = (): void => { rejectAbort(abortError(signal)) }
-  signal.addEventListener('abort', onAbort, { once: true })
-  try {
-    return await Promise.race([pending, aborted])
-  } finally {
-    signal.removeEventListener('abort', onAbort)
-  }
-}
-
 function phaseOf(value: unknown): ActiveBlock['phase'] {
   if (value === undefined || value === null) return null
   if (value === 'commentary' || value === 'final_answer') return value
@@ -143,6 +208,12 @@ function messageText(value: unknown): string {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return String(value)
   const message = (value as Record<string, unknown>).message
   return typeof message === 'string' ? message : JSON.stringify(value)
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
 }
 
 function turnFailure(turn: Record<string, unknown>): Error {
@@ -189,15 +260,6 @@ function deniedDecision(params: Record<string, unknown>, cancelled: boolean): 'c
   throw new Error('codex-plugin-dsh: App Server offered no fail-closed approval decision')
 }
 
-function approvalReason(method: string, params: Record<string, unknown>): string {
-  const facts = [
-    optionalString(params.reason),
-    optionalString(params.command),
-    optionalString(params.cwd),
-  ].filter((value): value is string => value !== undefined && value.length > 0)
-  return facts.length === 0 ? `Codex App Server requested ${method}` : facts.join('\n')
-}
-
 function catalogModel(value: unknown): CatalogModel | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
@@ -215,6 +277,9 @@ function catalogModel(value: unknown): CatalogModel | undefined {
         }]
       })
     : []
+  const inputModalities = Array.isArray(raw.inputModalities)
+    ? raw.inputModalities.filter((item): item is ModelModality => item === 'text' || item === 'image')
+    : ['text'] as const
   return {
     id: raw.id,
     name: typeof raw.displayName === 'string' && raw.displayName.length > 0 ? raw.displayName : raw.id,
@@ -223,6 +288,7 @@ function catalogModel(value: unknown): CatalogModel | undefined {
       ? { defaultReasoningEffort: raw.defaultReasoningEffort }
       : {},
     supportedReasoningEfforts: efforts,
+    inputModalities,
   }
 }
 
@@ -230,6 +296,7 @@ function catalogModel(value: unknown): CatalogModel | undefined {
 export class CodexAppServerAdapter extends LlmAdapter {
   private cachedModels: { readonly expiresAt: number; readonly models: readonly CatalogModel[] } | undefined
   private pendingModels: Promise<readonly CatalogModel[]> | undefined
+  private readonly activeTurns = new Map<string, ActiveCodexTurn>()
 
   constructor(
     private readonly ctx: Context,
@@ -248,8 +315,7 @@ export class CodexAppServerAdapter extends LlmAdapter {
       id: model.id,
       name: model.name,
       ...model.description === undefined ? {} : { description: model.description },
-      // The App Server accepts images, but this adapter cannot yet resolve DSH attachment refs to local paths.
-      inputModalities: ['text'],
+      inputModalities: model.inputModalities,
     }))
   }
 
@@ -265,7 +331,7 @@ export class CodexAppServerAdapter extends LlmAdapter {
       id: model.id,
       name: model.name,
       ...model.description === undefined ? {} : { description: model.description },
-      inputModalities: ['text'],
+      inputModalities: model.inputModalities,
       ...model.supportedReasoningEfforts.length === 0
         ? {}
         : {
@@ -290,9 +356,6 @@ export class CodexAppServerAdapter extends LlmAdapter {
     if (options.sessionId === undefined) {
       throw new Error('codex-plugin-dsh: Codex App Server calls require a live DSH session')
     }
-    if (options.tools !== undefined && options.tools.length > 0) {
-      throw new Error('codex-plugin-dsh: DSH tool schemas reached App Server; the provider isolation listener is not active')
-    }
     const unsupported = [
       options.temperature === undefined ? undefined : 'temperature',
       options.maxTokens === undefined ? undefined : 'maxTokens',
@@ -302,100 +365,107 @@ export class CodexAppServerAdapter extends LlmAdapter {
       throw new Error(`codex-plugin-dsh: App Server does not support DSH request field(s): ${unsupported.join(', ')}`)
     }
     const session = this.ctx.sessions.get(options.sessionId)
-    const agent = this.ctx.agents.get(options.sessionId)
-    if (session === undefined || agent === undefined) {
+    if (session === undefined) {
       throw new Error(`codex-plugin-dsh: session ${JSON.stringify(options.sessionId)} is not live`)
     }
     const cwd = session.header.cwd
     if (cwd === undefined) {
       throw new Error('codex-plugin-dsh: the selected DSH session has no working directory')
     }
-    const history = prepareCodexHistory(options.messages, CODEX_APP_SERVER_PROVIDER)
-    const signal = combinedSignal(options.signal, this.config.turnTimeoutMs)
-    const sandbox = (effectiveSandboxMode(session.events) ?? this.config.fallbackSandbox) as SandboxMode
-    const approval = (effectiveApprovalPolicy(session.events) ?? this.ctx.approval.config.policy ?? 'ask') as ApprovalPolicy
-    let activeThreadId: string | undefined
-    let activeTurnId: string | undefined
-    const connection = await this.openConnection(
-      cwd,
-      signal,
-      (method, params) => this.handleServerRequest(agent, signal, method, params),
-    )
-    const onAbort = (): void => {
-      if (activeThreadId !== undefined && activeTurnId !== undefined) {
-        connection.interrupt(activeThreadId, activeTurnId)
+    const sessionId = String(options.sessionId)
+    const requestedToolSignature = codexToolSignature(options.tools)
+    let active = this.activeTurns.get(sessionId)
+    if (active === undefined) {
+      active = await this.startTurn(options, sessionId, cwd)
+    } else {
+      if (active.model !== options.model) {
+        throw new Error('codex-plugin-dsh: the model changed while an App Server dynamic tool call was pending')
       }
+      if (active.toolSignature !== requestedToolSignature) {
+        throw new Error('codex-plugin-dsh: the DSH tool catalog changed while an App Server dynamic tool call was pending')
+      }
+      options.signal?.throwIfAborted()
+      const pending = active.awaiting
+      if (pending === undefined) {
+        throw new Error('codex-plugin-dsh: an App Server turn is already active for this DSH session')
+      }
+      const continuation = await codexDynamicToolResult(
+        options.messages,
+        pending.call.callId,
+        active.resolveImageUrl,
+      )
+      if (continuation.steerInput.length > 0) {
+        await active.connection.request('turn/steer', {
+          threadId: active.threadId,
+          expectedTurnId: active.turnId,
+          input: continuation.steerInput,
+        }, active.signal)
+      }
+      pending.response.resolve(continuation.response)
+      delete active.awaiting
+      active.blocks.clear()
+      active.nextBlockIndex = 0
+      active.finalOutput = false
     }
-    signal.addEventListener('abort', onAbort, { once: true })
+    let keepAlive = false
     try {
-      await connection.initialize(signal)
-      const threadResult = history.checkpoint === undefined
-        ? await connection.request('thread/start', this.threadParams(options, cwd, sandbox, approval), signal)
-        : await connection.request('thread/fork', {
-            ...this.threadParams(options, cwd, sandbox, approval),
-            threadId: history.checkpoint.threadId,
-            lastTurnId: history.checkpoint.turnId,
-          }, signal)
-      const thread = object(threadResult.thread, 'thread result')
-      activeThreadId = string(thread.id, 'thread id')
-      if (history.injectItems.length > 0) {
-        await connection.request('thread/inject_items', {
-          threadId: activeThreadId,
-          items: history.injectItems,
-        }, signal)
-      }
-      const turnResult = await connection.request('turn/start', {
-        threadId: activeThreadId,
-        input: history.turnInput,
-        model: options.model,
-        ...options.reasoningEffort === undefined ? {} : { effort: options.reasoningEffort },
-      }, signal)
-      const turn = object(turnResult.turn, 'turn/start turn')
-      activeTurnId = string(turn.id, 'turn id')
-      const replayState: CodexReplayState = {
-        kind: 'codex-app-server',
-        version: 1,
-        threadId: activeThreadId,
-        turnId: activeTurnId,
-        sessionId: options.sessionId,
-      }
-      const blocks = new Map<string, ActiveBlock>()
-      let nextBlockIndex = 0
-      let finalText = false
-      let usage: TokenUsage | undefined
-      const iterator = connection.notifications()[Symbol.asyncIterator]()
       for (;;) {
-        const next = await nextNotification(iterator, signal)
-        if (next.done) throw new Error('codex-plugin-dsh: App Server closed before turn/completed')
-        const { method, params } = next.value
-        if (params.threadId !== activeThreadId) continue
+        const event = await active.events.next(active.signal)
+        if (event.kind === 'dynamic-tool') {
+          const { call } = event
+          if (call.threadId !== active.threadId || call.turnId !== active.turnId) continue
+          if (active.awaiting !== undefined) {
+            throw new Error('codex-plugin-dsh: App Server issued another dynamic tool call before DSH returned the first result')
+          }
+          if ([...active.blocks.values()].some(block => !block.ended)) {
+            throw new Error('codex-plugin-dsh: App Server requested a dynamic tool with an open agent message')
+          }
+          const argumentsText = JSON.stringify(call.arguments)
+          if (argumentsText === undefined) {
+            throw new Error(`codex-plugin-dsh: App Server returned invalid arguments for DSH tool ${JSON.stringify(call.tool)}`)
+          }
+          const index = active.nextBlockIndex++
+          const id = CallId(call.callId)
+          yield { type: 'block-start', index, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index, id, name: call.tool, argumentsDelta: argumentsText }
+          yield { type: 'block-end', index, block: { type: 'tool-call', id, name: call.tool, arguments: argumentsText } }
+          active.awaiting = event
+          active.blocks.clear()
+          active.nextBlockIndex = 0
+          active.finalOutput = false
+          keepAlive = true
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        const { method, params } = event.notification
+        if (params.threadId !== active.threadId) continue
         const notificationTurnId = method === 'turn/completed'
           ? object(params.turn, 'turn/completed turn').id
           : params.turnId
-        if (notificationTurnId !== activeTurnId) continue
+        if (notificationTurnId !== active.turnId) continue
         if (method === 'item/started') {
           const item = object(params.item, 'started item')
           if (item.type !== 'agentMessage') continue
           const itemId = string(item.id, 'agent message item id')
-          if (blocks.has(itemId)) continue
+          if (active.blocks.has(itemId)) continue
           const phase = phaseOf(item.phase)
           const block: ActiveBlock = {
-            index: nextBlockIndex++,
+            index: active.nextBlockIndex++,
             type: blockType(phase),
             phase,
             text: '',
             ended: false,
           }
-          blocks.set(itemId, block)
+          active.blocks.set(itemId, block)
           yield { type: 'block-start', index: block.index, blockType: block.type }
           continue
         }
         if (method === 'item/agentMessage/delta') {
           const itemId = string(params.itemId, 'agent message delta item id')
-          let block = blocks.get(itemId)
+          let block = active.blocks.get(itemId)
           if (block === undefined) {
-            block = { index: nextBlockIndex++, type: 'text', phase: null, text: '', ended: false }
-            blocks.set(itemId, block)
+            block = { index: active.nextBlockIndex++, type: 'text', phase: null, text: '', ended: false }
+            active.blocks.set(itemId, block)
             yield { type: 'block-start', index: block.index, blockType: block.type }
           }
           if (block.ended) throw new Error('codex-plugin-dsh: App Server emitted a delta after item/completed')
@@ -407,13 +477,25 @@ export class CodexAppServerAdapter extends LlmAdapter {
         }
         if (method === 'item/completed') {
           const item = object(params.item, 'completed item')
+          if (item.type === 'imageGeneration') {
+            const itemId = string(item.id, 'image generation item id')
+            if (active.completedImages.has(itemId)) continue
+            active.completedImages.add(itemId)
+            const image = await generatedImageBlock(this.ctx.attachments, item)
+            if (image === undefined) continue
+            const index = active.nextBlockIndex++
+            yield { type: 'block-start', index, blockType: 'image' }
+            yield { type: 'block-end', index, block: image }
+            active.finalOutput = true
+            continue
+          }
           if (item.type !== 'agentMessage') continue
           const itemId = string(item.id, 'completed agent message item id')
           const phase = phaseOf(item.phase)
-          let block = blocks.get(itemId)
+          let block = active.blocks.get(itemId)
           if (block === undefined) {
-            block = { index: nextBlockIndex++, type: blockType(phase), phase, text: '', ended: false }
-            blocks.set(itemId, block)
+            block = { index: active.nextBlockIndex++, type: blockType(phase), phase, text: '', ended: false }
+            active.blocks.set(itemId, block)
             yield { type: 'block-start', index: block.index, blockType: block.type }
           }
           const completedText = typeof item.text === 'string' ? item.text : ''
@@ -431,12 +513,12 @@ export class CodexAppServerAdapter extends LlmAdapter {
             yield { type: 'block-end', index: block.index, block: { type: 'reasoning', text: block.text } }
           } else {
             yield { type: 'block-end', index: block.index, block: { type: 'text', text: block.text } }
-            if (block.phase !== 'commentary' && block.text.trim().length > 0) finalText = true
+            if (block.phase !== 'commentary' && block.text.trim().length > 0) active.finalOutput = true
           }
           continue
         }
         if (method === 'thread/tokenUsage/updated') {
-          usage = usageFrom(params.tokenUsage)
+          active.usage = usageFrom(params.tokenUsage)
           continue
         }
         if (method === 'error' && params.willRetry !== true) {
@@ -445,38 +527,216 @@ export class CodexAppServerAdapter extends LlmAdapter {
         if (method !== 'turn/completed') continue
         const completedTurn = object(params.turn, 'turn/completed turn')
         if (contextWindowExceeded(completedTurn)) {
-          if (usage !== undefined) yield { type: 'usage', usage }
-          yield { type: 'finish', reason: { kind: 'max-tokens' }, replayState }
+          if (active.usage !== undefined) yield { type: 'usage', usage: active.usage }
+          yield { type: 'finish', reason: { kind: 'max-tokens' }, replayState: active.replayState }
           return
         }
         if (completedTurn.status !== 'completed') throw turnFailure(completedTurn)
-        if ([...blocks.values()].some(block => !block.ended)) {
+        if ([...active.blocks.values()].some(block => !block.ended)) {
           throw new Error('codex-plugin-dsh: App Server completed with an open agent message')
         }
-        if (!finalText) throw new Error('codex-plugin-dsh: App Server completed without a final answer')
-        if (usage !== undefined) yield { type: 'usage', usage }
-        yield { type: 'finish', reason: { kind: 'stop' }, replayState }
+        if (!active.finalOutput) throw new Error('codex-plugin-dsh: App Server completed without a final answer or image')
+        if (active.usage !== undefined) yield { type: 'usage', usage: active.usage }
+        yield { type: 'finish', reason: { kind: 'stop' }, replayState: active.replayState }
         return
       }
     } finally {
-      signal.removeEventListener('abort', onAbort)
-      await connection.close()
+      if (!keepAlive) await this.closeTurn(active)
     }
+  }
+
+  private async startTurn(
+    options: GenerateOptions,
+    sessionId: string,
+    cwd: string,
+  ): Promise<ActiveCodexTurn> {
+    const signal = combinedSignal(options.signal, this.config.turnTimeoutMs)
+    const imageUrls = new Map<string, Promise<string>>()
+    const resolveImageUrl = (attachment: ImageAttachmentRef): Promise<string> => {
+      const key = String(attachment.attachmentId)
+      const existing = imageUrls.get(key)
+      if (existing !== undefined) return existing
+      const pending = attachmentDataUrl(this.ctx.attachments, attachment, signal)
+      imageUrls.set(key, pending)
+      return pending
+    }
+    let history = await prepareCodexHistory(options.messages, CODEX_APP_SERVER_PROVIDER, resolveImageUrl)
+    const toolSignature = codexToolSignature(options.tools)
+    if (history.checkpoint !== undefined && history.checkpoint.toolSignature !== toolSignature) {
+      history = await prepareCodexHistory(options.messages, CODEX_APP_SERVER_PROVIDER, resolveImageUrl, true)
+    }
+    const availableTools = new Set((options.tools ?? []).map(tool => tool.name))
+    const events = new ActiveTurnQueue()
+    let threadId: string | undefined
+    let turnId: string | undefined
+    let connection: CodexAppServerConnection | undefined
+    const observer: AppServerConnectionObserver = {
+      notification: notification => { events.push({ kind: 'notification', notification }) },
+      failure: error => { events.fail(error) },
+    }
+    try {
+      connection = await this.openConnection(
+        cwd,
+        signal,
+        (method, params) => {
+          if (method !== 'item/tool/call') return this.handleServerRequest(method, params)
+          const response = Promise.withResolvers<unknown>()
+          events.push({
+            kind: 'dynamic-tool',
+            call: codexDynamicToolCall(params, availableTools),
+            response,
+          })
+          return response.promise
+        },
+        observer,
+      )
+      await connection.initialize(signal)
+      const isolationConfig = await this.isolationConfig(connection, signal)
+      const dynamicTools = history.checkpoint?.toolSignature === toolSignature
+        ? undefined
+        : codexDynamicTools(options.tools)
+      const threadResult = history.checkpoint === undefined
+        ? await connection.request(
+            'thread/start',
+            this.threadParams(options, cwd, isolationConfig, dynamicTools ?? []),
+            signal,
+          )
+        : await connection.request('thread/fork', {
+          ...this.threadParams(options, cwd, isolationConfig),
+          threadId: history.checkpoint.threadId,
+          lastTurnId: history.checkpoint.turnId,
+        }, signal)
+      const thread = object(threadResult.thread, 'thread result')
+      threadId = string(thread.id, 'thread id')
+      if (history.injectItems.length > 0) {
+        await connection.request('thread/inject_items', {
+          threadId,
+          items: history.injectItems,
+        }, signal)
+      }
+      const turnResult = await connection.request('turn/start', {
+        threadId,
+        input: history.turnInput,
+        model: options.model,
+        ...options.reasoningEffort === undefined ? {} : { effort: options.reasoningEffort },
+      }, signal)
+      const turn = object(turnResult.turn, 'turn/start turn')
+      turnId = string(turn.id, 'turn id')
+      let active!: ActiveCodexTurn
+      active = {
+        sessionId,
+        model: options.model,
+        toolSignature,
+        connection,
+        events,
+        signal,
+        threadId,
+        turnId,
+        replayState: {
+          kind: 'codex-app-server',
+          version: 1,
+          threadId,
+          turnId,
+          sessionId,
+          toolSignature,
+        },
+        resolveImageUrl,
+        onAbort: () => {
+          connection?.interrupt(threadId as string, turnId as string)
+          void this.closeTurn(active)
+        },
+        blocks: new Map(),
+        completedImages: new Set(),
+        nextBlockIndex: 0,
+        finalOutput: false,
+      }
+      signal.addEventListener('abort', active.onAbort, { once: true })
+      this.activeTurns.set(active.sessionId, active)
+      return active
+    } catch (error) {
+      events.fail(thrown(error))
+      await connection?.close()
+      throw error
+    }
+  }
+
+  private async closeTurn(active: ActiveCodexTurn): Promise<void> {
+    if (active.closing !== undefined) return active.closing
+    const closing = this.finishCloseTurn(active)
+    active.closing = closing
+    return closing
+  }
+
+  private async finishCloseTurn(active: ActiveCodexTurn): Promise<void> {
+    if (this.activeTurns.get(active.sessionId) === active) this.activeTurns.delete(active.sessionId)
+    active.signal.removeEventListener('abort', active.onAbort)
+    const closed = new Error('codex-plugin-dsh: App Server turn closed before a pending DSH tool result was returned')
+    active.awaiting?.response.reject(closed)
+    active.events.fail(closed)
+    await active.connection.close()
+  }
+
+  /** Close an unfinished App Server turn after the owning DSH turn ends. */
+  closeSession(sessionId: string): void {
+    const active = this.activeTurns.get(sessionId)
+    if (active !== undefined) void this.closeTurn(active)
+  }
+
+  /** Dispose every App Server process retained across DSH tool execution. */
+  async dispose(): Promise<void> {
+    await Promise.all([...this.activeTurns.values()].map(active => this.closeTurn(active)))
   }
 
   private threadParams(
     options: GenerateOptions,
     cwd: string,
-    sandbox: SandboxMode,
-    approval: ApprovalPolicy,
+    isolationConfig: Record<string, unknown>,
+    dynamicTools?: readonly unknown[],
   ): Record<string, unknown> {
     return {
       cwd,
       model: options.model,
-      approvalPolicy: approval === 'never' ? 'never' : 'on-request',
-      sandbox,
+      approvalPolicy: 'never',
+      sandbox: 'read-only',
+      config: isolationConfig,
       ephemeral: false,
       ...options.system === undefined ? {} : { baseInstructions: options.system },
+      developerInstructions: [
+        'DeepSeek Harness owns tool selection, permission checks, execution, and durable tool logs.',
+        'Use only tools in the dsh dynamic-tool namespace for shell, files, web, code changes, and all other actions.',
+        'Do not use built-in shell, apply_patch, web search, MCP, app, plugin, multi-agent, or view-image tools.',
+        'Codex native image generation is allowed when the user requests an image.',
+      ].join(' '),
+      ...dynamicTools === undefined ? {} : { dynamicTools },
+    }
+  }
+
+  private async isolationConfig(
+    connection: CodexAppServerConnection,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const result = await connection.request('config/read', { includeLayers: false }, signal)
+    const current = recordValue(result.config)
+    const disabledMcpServers = Object.fromEntries(
+      Object.keys(recordValue(current.mcp_servers)).map(name => [name, { enabled: false }]),
+    )
+    const disabledApps = Object.fromEntries(
+      Object.keys(recordValue(current.apps))
+        .filter(name => name !== '_default')
+        .map(name => [name, { enabled: false }]),
+    )
+    return {
+      features: {
+        shell_tool: false,
+        unified_exec: false,
+        multi_agent: false,
+        plugins: false,
+      },
+      agents: { enabled: false },
+      web_search: 'disabled',
+      tools: { view_image: false },
+      apps: { _default: { enabled: false }, ...disabledApps },
+      mcp_servers: disabledMcpServers,
     }
   }
 
@@ -530,6 +790,7 @@ export class CodexAppServerAdapter extends LlmAdapter {
     cwd: string,
     signal: AbortSignal,
     requestHandler: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+    observer?: AppServerConnectionObserver,
   ): Promise<CodexAppServerConnection> {
     const executable = await this.ctx.subprocess.resolveExecutable(this.config.executable, this.config.env, signal)
     const batchShim = process.platform === 'win32' && ['.cmd', '.bat'].includes(extname(executable).toLowerCase())
@@ -548,44 +809,19 @@ export class CodexAppServerAdapter extends LlmAdapter {
       graceMs: this.config.disposeGraceMs,
       env: invocation.env,
     })
-    return new CodexAppServerConnection(child, requestHandler)
+    return new CodexAppServerConnection(child, requestHandler, observer)
   }
 
   private async handleServerRequest(
-    agent: Agent,
-    signal: AbortSignal,
     method: string,
     params: Record<string, unknown>,
   ): Promise<unknown> {
     switch (method) {
       case 'item/commandExecution/requestApproval':
-      case 'item/fileChange/requestApproval': {
-        const outcome = await this.ctx.approval.request({
-          agent,
-          toolName: method === 'item/commandExecution/requestApproval' ? 'codex:command' : 'codex:file-change',
-          reason: approvalReason(method, params),
-          signal,
-        })
-        if (outcome === 'allowed-once') {
-          const available = availableDecisions(params)
-          if (available !== undefined && !available.has('accept')) {
-            return { decision: deniedDecision(params, false) }
-          }
-          return { decision: 'accept' }
-        }
-        return { decision: deniedDecision(params, outcome === 'cancelled') }
-      }
-      case 'item/permissions/requestApproval': {
-        const outcome = await this.ctx.approval.request({
-          agent,
-          toolName: 'codex:permissions',
-          reason: approvalReason(method, params),
-          signal,
-        })
-        return outcome === 'allowed-once'
-          ? { permissions: object(params.permissions, 'requested permissions'), scope: 'turn' }
-          : { permissions: {}, scope: 'turn' }
-      }
+      case 'item/fileChange/requestApproval':
+        return { decision: deniedDecision(params, false) }
+      case 'item/permissions/requestApproval':
+        return { permissions: {}, scope: 'turn' }
       case 'mcpServer/elicitation/request':
         return { action: 'decline', content: null, _meta: null }
       case 'item/tool/requestUserInput':
