@@ -39,6 +39,8 @@ Until a versioned release exists, pin a tested commit for a reproducible install
 dsh plugin --profile web add github:wingoo/codex-plugin-dsh#<commit-sha>
 ```
 
+Current DSH `0.1.0-rc` packages can make pnpm print a peer-dependency warning while installing their service packages. The plugin owns the runtime packages it imports; a clean-profile GitHub install, Web startup, model discovery, and real Codex turn have been verified despite that warning.
+
 ## Install a local checkout
 
 ```sh

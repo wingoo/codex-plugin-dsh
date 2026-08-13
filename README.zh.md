@@ -39,6 +39,8 @@ pnpm dsh plugin --profile web add github:wingoo/codex-plugin-dsh
 dsh plugin --profile web add github:wingoo/codex-plugin-dsh#<commit-sha>
 ```
 
+当前 DSH `0.1.0-rc` 包在安装其 service package 时可能让 pnpm 输出 peer-dependency warning。插件已经显式拥有它在运行时导入的 package；即使出现这条 warning，全新 profile 的 GitHub 安装、Web 启动、模型发现和真实 Codex 回合都已验证通过。
+
 ## 安装本地 checkout
 
 ```sh
