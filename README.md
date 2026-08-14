@@ -4,62 +4,46 @@
 
 ![Codex App Server 与 DeepSeek Harness 的本地 provider 架构](docs/assets/codex-dsh-hero.png)
 
-把本机已经安装并登录的 Codex CLI 作为 DeepSeek Harness 的一等模型提供方使用。插件启动 `codex app-server --stdio`，发现当前 Codex 账户可用的模型，并把它们放进现有的逐会话模型选择器，分组名称为 **Codex App Server (local)**。
+在 DeepSeek Harness 里直接使用你本机已经登录的 Codex，无需在 DSH 中配置 OpenAI API Key。安装并重启后，现有模型选择器中会出现 **Codex App Server (local)**，选择模型即可开始对话。
 
-插件不会新增 Agent Runtime 设置页，不会改变“模型／API Key”设置流程，也不要求 OpenAI API Key。选择 Codex 模型只会切换普通 DSH 模型路由背后的运行时，外围会话界面保持不变。
+会话和工具调用仍由 DSH 管理，现有 DSH 插件与工具可以照常使用；模型请求通过本地 Codex App Server 连接当前 Codex 账户。插件也支持图片输入，并能把 Codex 原生图片生成结果直接回写到 DSH 对话。
 
-## 当前状态
+## 快速安装：直接让 DSH 完成
 
-目前已在 macOS 上使用 DeepSeek Harness `0.1.0-rc.5` 源码包、`0.1.0-rc.6` 发布包和 Codex CLI `0.147.0` 完成验证。本地 bundle 安装、模型发现、Web 端现有模型选择器、真实图片输入、App Server 图片生成回写，以及 DSH 工具调用、结果续跑、附加上下文和工具目录更新均已通过真实 App Server 测试。Windows 批处理 shim 启动已有单元测试，首个版本发布前仍需在真实 Windows 主机上运行一次。
+如果当前 DSH 会话具有完整的宿主机权限，把下面这段话直接发给它：
 
-## 环境要求
+```text
+请将 github:wingoo/codex-plugin-dsh 安装到当前 DSH 的 web profile，不要修改 DeepSeek Harness 源码。
 
-- Node.js `^22.19.0` 或 `>=24`
-- DeepSeek Harness `>=0.1.0-rc.5 <0.2.0`
-- 本地 Codex CLI `>=0.147.0`
-- 已通过 `codex login` 登录的原生 Codex 账户
+1. 检查本机是否已经安装符合插件要求的 Codex CLI；如果尚未安装或版本过旧，请先按照 OpenAI 官方方式安装或升级。
+2. 运行 codex login status 检查登录状态。如果尚未登录，请让我在运行 DSH 的主机终端执行 codex login；等我完成浏览器登录并回复“已登录”后再继续。
+3. 确认 codex app-server --help 可以正常运行。
+4. 安装插件，并通过 dsh --profile web --dump-config 确认 codex-app-server-provider 已加载。
+5. 沿用当前 DSH Web 服务原来的启动方式完成重启，不要在同一端口启动第二个实例。重启前提醒我连接会暂时中断。
+6. 服务恢复后提醒我刷新页面，并在现有模型选择器中选择 Codex App Server (local)。
 
-账户认证和 Codex 产品设置由 Codex CLI 自己管理。插件不读取也不保存 API Key。
-
-## 先安装 Codex CLI
-
-本插件调用宿主机上的 Codex CLI，不会代为下载、升级或登录 Codex。按照 [OpenAI Codex CLI](https://github.com/openai/codex) 的安装方式准备本机运行时：
-
-```sh
-npm install -g @openai/codex
-codex login
+如果无法可靠判断原来的启动方式，不要猜测或结束无关进程，直接告诉我应该执行的重启命令。
 ```
 
-安装后确认当前 DSH 运行环境可以找到 Codex，版本不低于 `0.147.0`，并且包含 App Server：
+这会修改 DSH profile 并在宿主机上运行插件代码，请先确认仓库来源。重启期间当前连接会暂时中断，服务恢复后刷新页面即可。
 
-```sh
-codex --version
-codex app-server --help
-```
-
-使用 `codex login` 登录即可；本插件不要求把 OpenAI API Key 填入 DSH。
-
-## 从 GitHub 安装
-
-仓库会提交构建后的运行文件，因此从 GitHub 安装时不需要执行安装期构建脚本：
+## 通过命令行安装
 
 ```sh
 dsh plugin --profile web add github:wingoo/codex-plugin-dsh
 ```
 
-如果从 DSH 源码仓库运行，请使用仓库的启动命令：
+如果从 DeepSeek Harness 源码仓库运行：
 
 ```sh
 pnpm dsh plugin --profile web add github:wingoo/codex-plugin-dsh
 ```
 
-在正式版本发布前，建议锁定已验证的 commit，确保安装结果可复现：
+正式版本发布前，可以锁定已验证的 commit，让安装结果保持一致：
 
 ```sh
 dsh plugin --profile web add github:wingoo/codex-plugin-dsh#<commit-sha>
 ```
-
-当前 DSH `0.1.0-rc` 包在安装其 service package 时可能让 pnpm 输出 peer-dependency warning。插件已经显式拥有它在运行时导入的 package；即使出现这条 warning，全新 profile 的 GitHub 安装、Web 启动、模型发现和真实 Codex 回合都已验证通过。
 
 ## 安装本地 checkout
 
@@ -67,34 +51,48 @@ dsh plugin --profile web add github:wingoo/codex-plugin-dsh#<commit-sha>
 dsh plugin --profile web add /absolute/path/to/codex-plugin-dsh
 ```
 
-从 DSH 源码仓库运行时：
+从 DeepSeek Harness 源码仓库运行时：
 
 ```sh
 pnpm dsh plugin --profile web add /absolute/path/to/codex-plugin-dsh
 ```
 
-## 安装后重启和刷新
+## 安装后使用
 
-新安装的 bundle 会在 `web` profile 下次启动时进入运行配置。安装命令完成后，沿用原来的启动方式重启当前 DSH Web 服务，不要在同一端口并行启动第二个实例。服务恢复后刷新浏览器，连接工作区，在输入框下方打开现有模型控件，然后在 **Codex App Server (local)** 分组中选择模型。
+沿用原来的启动方式重启 DSH Web 服务，不要在同一端口启动第二个实例。服务恢复后刷新浏览器，在输入框下方打开现有模型选择器，然后从 **Codex App Server (local)** 分组中选择模型。
 
-如果安装由具备完整权限的 DSH Agent 执行，并且它能够确认当前服务的启动方式，也可以让它完成重启。重启会中断正在进行的对话连接，这是预期行为；用户只需在服务恢复后刷新页面。DSH 目前没有单独的“创建会话时选择模型”入口；空白工作区会话先使用当前默认模型，也可以在发送第一条消息前通过原有模型控件切换。
+空白工作区会话最初使用当前默认模型；发送第一条消息前也可以先切换到 Codex。
 
-## 通过 DSH 对话安装
+## 环境要求
 
-当前 DSH 会话具有完整权限时，可以把下面这段话直接发给它：
+- Node.js `^22.19.0` 或 `>=24`
+- DeepSeek Harness `>=0.1.0-rc.5 <0.2.0`
+- 本地 Codex CLI `>=0.147.0`
+- 已通过 `codex login` 登录的 Codex 账户
 
-```text
-请把 github:wingoo/codex-plugin-dsh 安装到当前 DSH 的 web profile，不要修改 DeepSeek Harness 源码。
+### 准备 Codex CLI
 
-1. 先确认 dsh、pnpm 和 codex 都可用，确认 codex --version 不低于 0.147.0，并确认 codex app-server --help 成功。
-2. 执行 dsh plugin --profile web add github:wingoo/codex-plugin-dsh。
-3. 执行 dsh --profile web --dump-config，确认 codex-app-server-provider 已进入配置。
-4. 识别当前 DSH Web 服务原来的启动方式；如果可以安全复用该方式，就重启当前服务，不要在同一端口启动第二个实例。
-5. 重启前提醒我：连接会暂时中断，服务恢复后刷新浏览器即可。
-6. 如果无法可靠确认原启动方式，不要猜测或误杀其他进程；告诉我准确的重启命令。
+本插件使用宿主机上的 Codex CLI，不会代为下载、升级或登录。按照 [OpenAI Codex CLI](https://github.com/openai/codex) 的安装方式准备本机运行时：
+
+```sh
+npm install -g @openai/codex
+codex login
 ```
 
-这仍然是一次宿主机插件安装，会修改 DSH profile 并执行所安装的代码；请先确认仓库来源。
+确认运行 DSH 的环境能够找到 Codex，并且 App Server 可用：
+
+```sh
+codex --version
+codex app-server --help
+```
+
+Codex CLI 自己管理账户认证和产品设置；插件不读取或保存 API Key，也不要求把 OpenAI API Key 填入 DSH。
+
+## 当前状态
+
+目前已在 macOS 上使用 DeepSeek Harness `0.1.0-rc.5` 源码包、`0.1.0-rc.6` 发布包和 Codex CLI `0.147.0` 完成验证。本地 bundle 安装、模型发现、Web 端现有模型选择器、真实图片输入、App Server 图片生成回写，以及 DSH 工具调用、结果续跑、附加上下文和工具目录更新均已通过真实 App Server 测试。
+
+Windows 批处理 shim 启动已有单元测试，首个版本发布前仍需在真实 Windows 主机上运行一次。当前 DSH `0.1.0-rc` 安装 service package 时可能输出 peer-dependency warning；插件已显式声明运行时依赖，全新 profile 的 GitHub 安装、Web 启动、模型发现和真实 Codex 回合均已验证通过。
 
 ## 配置
 

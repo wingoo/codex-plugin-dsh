@@ -4,62 +4,46 @@ English | [中文](README.md)
 
 ![Local Codex App Server provider architecture for DeepSeek Harness](docs/assets/codex-dsh-hero.png)
 
-Use the locally installed Codex CLI as a first-class model provider in DeepSeek Harness. The plugin starts `codex app-server --stdio`, discovers the models available to the signed-in Codex account, and adds them to the existing per-session model selector under **Codex App Server (local)**.
+Use the Codex account already signed in on your computer directly from DeepSeek Harness. No OpenAI API key needs to be configured in DSH. After installing the plugin and restarting DSH, select a model from **Codex App Server (local)** in the existing model selector and start chatting.
 
-It does not add an Agent Runtime settings page, alter the Models/API-key settings flow, or require an OpenAI API key. Selecting a Codex model changes the runtime behind the ordinary DSH model route; the surrounding conversation UI remains the same.
+DSH continues to own the conversation and tool execution, so the existing DSH plugin and tool ecosystem remains available. Model requests reach the current Codex account through the local Codex App Server. The plugin also supports image input and writes native Codex image-generation results back into the DSH conversation.
 
-## Current status
+## Quick install through DSH
 
-The provider has been exercised against DeepSeek Harness `0.1.0-rc.5` source packages and `0.1.0-rc.6` published packages with Codex CLI `0.147.0` on macOS. A local bundle install, model discovery, the existing Web model selector, real image input, App Server image-generation output, DSH tool execution, continuation, extra context, and tool-catalog changes all pass against a real App Server. Windows batch-shim startup has unit coverage but still needs a real Windows host run before the first release.
+In a DSH session with full host permissions, send this prompt:
 
-## Requirements
+```text
+Install github:wingoo/codex-plugin-dsh into the current DSH web profile without modifying DeepSeek Harness source.
 
-- Node.js `^22.19.0` or `>=24`
-- DeepSeek Harness `>=0.1.0-rc.5 <0.2.0`
-- A local Codex CLI `>=0.147.0`
-- A signed-in native Codex account (`codex login`)
+1. Check whether a Codex CLI version that satisfies the plugin requirements is installed. If it is missing or outdated, install or upgrade it using the official OpenAI method.
+2. Run codex login status. If Codex is not signed in, ask me to run codex login in a terminal on the DSH host. Wait until I complete the browser flow and reply "signed in" before continuing.
+3. Confirm that codex app-server --help succeeds.
+4. Install the plugin and use dsh --profile web --dump-config to confirm that codex-app-server-provider is loaded.
+5. Restart the current DSH Web service using its original launch method without starting a second instance on the same port. Before restarting, tell me that the connection will be interrupted.
+6. When the service returns, tell me to refresh the page and select Codex App Server (local) in the existing model selector.
 
-The Codex CLI owns account authentication and its own product settings. The plugin does not read or store an API key.
-
-## Install Codex CLI first
-
-This plugin invokes the Codex CLI on the DSH host. It does not download, upgrade, or sign in to Codex for you. Prepare the local runtime using the [OpenAI Codex CLI](https://github.com/openai/codex) installation:
-
-```sh
-npm install -g @openai/codex
-codex login
+If the original launch method cannot be determined reliably, do not guess or terminate unrelated processes. Give me the exact restart command instead.
 ```
 
-Confirm that Codex is visible in the environment where DSH runs, is at least version `0.147.0`, and includes App Server:
+This modifies the DSH profile and executes plugin code on the host, so verify the repository source first. The active connection will briefly drop during the restart; refresh the page after the service returns.
 
-```sh
-codex --version
-codex app-server --help
-```
-
-Signing in with `codex login` is sufficient; the plugin does not require an OpenAI API key in DSH.
-
-## Install from GitHub
-
-The repository includes built runtime files, so a GitHub installation does not need to run an install-time build script:
+## Install from the command line
 
 ```sh
 dsh plugin --profile web add github:wingoo/codex-plugin-dsh
 ```
 
-When running DSH from its source checkout, use its launcher instead:
+When running DeepSeek Harness from its source checkout:
 
 ```sh
 pnpm dsh plugin --profile web add github:wingoo/codex-plugin-dsh
 ```
 
-Until a versioned release exists, pin a tested commit for a reproducible installation:
+Before a versioned release exists, pin a tested commit for a reproducible installation:
 
 ```sh
 dsh plugin --profile web add github:wingoo/codex-plugin-dsh#<commit-sha>
 ```
-
-Current DSH `0.1.0-rc` packages can make pnpm print a peer-dependency warning while installing their service packages. The plugin owns the runtime packages it imports; a clean-profile GitHub install, Web startup, model discovery, and real Codex turn have been verified despite that warning.
 
 ## Install a local checkout
 
@@ -67,34 +51,48 @@ Current DSH `0.1.0-rc` packages can make pnpm print a peer-dependency warning wh
 dsh plugin --profile web add /absolute/path/to/codex-plugin-dsh
 ```
 
-From a DSH source checkout:
+From a DeepSeek Harness source checkout:
 
 ```sh
 pnpm dsh plugin --profile web add /absolute/path/to/codex-plugin-dsh
 ```
 
-## Restart and refresh
+## Use it after installation
 
-The newly installed bundle enters the runtime configuration the next time the `web` profile starts. After installation, restart the current DSH Web service using its original launch method; do not start a second instance on the same port. When the service is available again, refresh the browser, connect a workspace, open the existing model control in the composer, and select a model in the **Codex App Server (local)** group.
+Restart DSH Web using its original launch method; do not start a second instance on the same port. When the service returns, refresh the browser, open the existing model selector below the composer, and select a model from **Codex App Server (local)**.
 
-When a fully privileged DSH Agent performs the installation and can identify the service's launch method, it can also complete the restart. The active conversation connection will be interrupted, which is expected; the user only needs to refresh after the service returns. DSH does not currently expose a separate create-time model picker; a blank workspace session uses the current default until its existing model control is changed.
+A blank workspace initially uses the current default model. You can switch to Codex before sending the first message.
 
-## Install through a DSH conversation
+## Requirements
 
-In a DSH session with full host permissions, send it this prompt:
+- Node.js `^22.19.0` or `>=24`
+- DeepSeek Harness `>=0.1.0-rc.5 <0.2.0`
+- A local Codex CLI `>=0.147.0`
+- A Codex account signed in through `codex login`
 
-```text
-Install github:wingoo/codex-plugin-dsh into the current DSH web profile without modifying DeepSeek Harness source.
+### Prepare the Codex CLI
 
-1. Confirm that dsh, pnpm, and codex are available, that codex --version is at least 0.147.0, and that codex app-server --help succeeds.
-2. Run dsh plugin --profile web add github:wingoo/codex-plugin-dsh.
-3. Run dsh --profile web --dump-config and confirm that codex-app-server-provider is present.
-4. Identify how the current DSH Web service was originally launched. If that method can be reused safely, restart the current service without starting a second instance on the same port.
-5. Before restarting, tell me that the connection will be interrupted and that I should refresh the browser after the service returns.
-6. If the original launch method cannot be determined reliably, do not guess or kill unrelated processes; give me the exact restart command instead.
+The plugin uses the Codex CLI installed on the DSH host. It does not download, upgrade, or sign in to Codex for you. Prepare the runtime using the [OpenAI Codex CLI](https://github.com/openai/codex) installation:
+
+```sh
+npm install -g @openai/codex
+codex login
 ```
 
-This is still a host-level plugin installation that modifies the DSH profile and executes installed code. Verify the repository source first.
+Confirm that Codex is visible in the environment where DSH runs and that App Server is available:
+
+```sh
+codex --version
+codex app-server --help
+```
+
+Codex CLI owns account authentication and product settings. The plugin does not read or store an API key, and no OpenAI API key needs to be entered in DSH.
+
+## Current status
+
+The provider has been exercised on macOS against DeepSeek Harness `0.1.0-rc.5` source packages and `0.1.0-rc.6` published packages with Codex CLI `0.147.0`. A local bundle install, model discovery, the existing Web model selector, real image input, App Server image-generation output, DSH tool execution, continuation, extra context, and tool-catalog changes all pass against a real App Server.
+
+Windows batch-shim startup has unit coverage but still needs a real Windows host run before the first release. Current DSH `0.1.0-rc` packages may print a peer-dependency warning while installing their service packages; the plugin declares its runtime dependencies explicitly, and clean-profile GitHub installation, Web startup, model discovery, and real Codex turns have been verified despite that warning.
 
 ## Configuration
 
