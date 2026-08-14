@@ -1,6 +1,6 @@
 # codex-plugin-dsh
 
-[English](README.en.md) | 中文
+中文 | [English](https://github.com/wingoo/codex-plugin-dsh/blob/main/README.en.md)
 
 ![Codex App Server 与 DeepSeek Harness 的本地 provider 架构](docs/assets/codex-dsh-hero.png)
 
@@ -62,6 +62,46 @@ pnpm dsh plugin --profile web add /absolute/path/to/codex-plugin-dsh
 沿用原来的启动方式重启 DSH Web 服务，不要在同一端口启动第二个实例。服务恢复后刷新浏览器，在输入框下方打开现有模型选择器，然后从 **Codex App Server (local)** 分组中选择模型。
 
 空白工作区会话最初使用当前默认模型；发送第一条消息前也可以先切换到 Codex。
+
+## 更新已安装插件：直接让 DSH 完成
+
+已经安装过插件时不需要先卸载。把下面这段话发给具有完整宿主机权限的 DSH 会话：
+
+```text
+请把当前 DSH web profile 中已经安装的 codex-plugin-dsh 更新到 GitHub main 的最新版本，不要修改 DeepSeek Harness 源码，也不要先卸载插件。
+
+1. 先运行 command -v dsh，确认当前环境能否直接调用 dsh。
+2. 如果可以，运行 dsh plugin --profile web update codex-plugin-dsh；如果没有全局 dsh 命令且当前服务通过 npx 启动，改用 npx --yes @deepseek-ai/dsh plugin --profile web update codex-plugin-dsh。
+3. 检查 ~/.dsh/profiles/web/pnpm-lock.yaml，确认 codex-plugin-dsh 的 GitHub tarball commit 已更新；同时运行 dsh --profile web --dump-config（npx 启动时使用对应的 npx 命令）确认 codex-app-server-provider 仍然存在。
+4. 更新成功后，沿用当前 Web 服务原来的启动方式重启，不要在同一端口启动第二个实例。重启前提醒我连接会暂时中断。
+5. 服务恢复后提醒我刷新页面，并新建一个会话测试 Codex 模型。
+
+如果更新命令被 sandbox 拒绝，请只为这个更新操作请求所需权限；如果无法可靠判断原来的启动方式，不要猜测或结束无关进程，直接告诉我应该执行的重启命令。
+```
+
+更新会刷新 GitHub 依赖所解析的 commit，同时保留 web profile 中已有的插件 bundle 配置。
+
+### 通过终端更新
+
+已经安装全局 `dsh` 命令：
+
+```sh
+dsh plugin --profile web update codex-plugin-dsh
+```
+
+通过 `npx` 运行 DSH：
+
+```sh
+npx --yes @deepseek-ai/dsh plugin --profile web update codex-plugin-dsh
+```
+
+从 DeepSeek Harness 源码仓库运行：
+
+```sh
+pnpm dsh plugin --profile web update codex-plugin-dsh
+```
+
+更新完成后必须重启原有 DSH Web 服务，正在运行的进程不会自动加载磁盘上的新插件代码。
 
 ## 环境要求
 

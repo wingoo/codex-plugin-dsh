@@ -1,6 +1,6 @@
 # codex-plugin-dsh
 
-English | [中文](README.md)
+[中文](https://github.com/wingoo/codex-plugin-dsh/blob/main/README.md) | English
 
 ![Local Codex App Server provider architecture for DeepSeek Harness](docs/assets/codex-dsh-hero.png)
 
@@ -62,6 +62,46 @@ pnpm dsh plugin --profile web add /absolute/path/to/codex-plugin-dsh
 Restart DSH Web using its original launch method; do not start a second instance on the same port. When the service returns, refresh the browser, open the existing model selector below the composer, and select a model from **Codex App Server (local)**.
 
 A blank workspace initially uses the current default model. You can switch to Codex before sending the first message.
+
+## Update an installed plugin through DSH
+
+An installed copy does not need to be removed first. Send the following prompt to a DSH session with full host access:
+
+```text
+Update the installed codex-plugin-dsh in the current DSH web profile to the latest GitHub main revision. Do not modify DeepSeek Harness source and do not remove the plugin first.
+
+1. Run command -v dsh to check whether this environment can invoke dsh directly.
+2. If it can, run dsh plugin --profile web update codex-plugin-dsh. If there is no global dsh command and the current service was launched through npx, use npx --yes @deepseek-ai/dsh plugin --profile web update codex-plugin-dsh instead.
+3. Inspect ~/.dsh/profiles/web/pnpm-lock.yaml and confirm that the GitHub tarball commit for codex-plugin-dsh changed. Also run dsh --profile web --dump-config, using the corresponding npx command when applicable, and confirm that codex-app-server-provider is still present.
+4. After the update succeeds, restart the existing Web service with its original launch method. Do not start a second instance on the same port. Warn me before the connection is interrupted.
+5. After the service returns, remind me to refresh the page and test a Codex model in a new conversation.
+
+If the sandbox blocks the update, request only the permission required for that operation. If the original launch method cannot be determined reliably, do not guess or terminate unrelated processes; tell me the restart command I should run.
+```
+
+The update refreshes the commit resolved for the GitHub dependency while preserving the existing plugin bundle entry in the web profile.
+
+### Update from a terminal
+
+With a globally installed `dsh` command:
+
+```sh
+dsh plugin --profile web update codex-plugin-dsh
+```
+
+When DSH is run through `npx`:
+
+```sh
+npx --yes @deepseek-ai/dsh plugin --profile web update codex-plugin-dsh
+```
+
+From a DeepSeek Harness source checkout:
+
+```sh
+pnpm dsh plugin --profile web update codex-plugin-dsh
+```
+
+Restart the existing DSH Web service after the update. A running process does not automatically load new plugin code from disk.
 
 ## Requirements
 
