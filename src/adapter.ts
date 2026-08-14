@@ -37,6 +37,15 @@ import { object, string, thrown } from './validation.ts'
 /** Provider route registered in the existing DSH model catalog. */
 export const CODEX_APP_SERVER_PROVIDER = 'codex-app-server'
 
+/** Provider instructions that separate DSH dynamic tools from Codex host capabilities. */
+export const CODEX_APP_SERVER_DEVELOPER_INSTRUCTIONS = [
+  'DeepSeek Harness owns tool selection, permission checks, execution, and durable tool logs.',
+  'Use only tools in the dsh dynamic-tool namespace for shell, files, web, code changes, and other actions represented in the DSH tool catalog.',
+  'Do not use built-in shell, apply_patch, web search, MCP, app, plugin, multi-agent, or view-image tools.',
+  'The dsh skill tool loads only names listed in the DSH <available_skills> catalog included in the conversation; never use it to load Codex host skills or capabilities.',
+  'For image creation or editing, use Codex host imagegen and native image generation directly; never call the dsh skill tool with the name imagegen.',
+].join(' ')
+
 const WINDOWS_EXECUTABLE_ENV = 'DSH_CODEX_APP_SERVER_EXECUTABLE'
 
 /** Resolved process and timeout configuration owned by the plugin deployment. */
@@ -701,12 +710,7 @@ export class CodexAppServerAdapter extends LlmAdapter {
       config: isolationConfig,
       ephemeral: false,
       ...options.system === undefined ? {} : { baseInstructions: options.system },
-      developerInstructions: [
-        'DeepSeek Harness owns tool selection, permission checks, execution, and durable tool logs.',
-        'Use only tools in the dsh dynamic-tool namespace for shell, files, web, code changes, and all other actions.',
-        'Do not use built-in shell, apply_patch, web search, MCP, app, plugin, multi-agent, or view-image tools.',
-        'Codex native image generation is allowed when the user requests an image.',
-      ].join(' '),
+      developerInstructions: CODEX_APP_SERVER_DEVELOPER_INSTRUCTIONS,
       ...dynamicTools === undefined ? {} : { dynamicTools },
     }
   }

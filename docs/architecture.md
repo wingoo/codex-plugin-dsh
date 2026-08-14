@@ -40,7 +40,7 @@ DSH tool-result text and images map to App Server dynamic-tool output. Messages 
 
 ## App Server capability isolation
 
-App Server runs with a read-only sandbox and `never` approval because environment actions belong to DSH Tool Runtime. Per-thread configuration disables shell, unified exec, Web search, multi-agent, Apps, Plugins, view-image, and every MCP server visible in the effective Codex configuration. Developer instructions restrict remaining action requests to the `dsh` namespace. Command, file-change, and permission approval requests fail closed if App Server still emits one.
+App Server runs with a read-only sandbox and `never` approval because environment actions belong to DSH Tool Runtime. Per-thread configuration disables shell, unified exec, Web search, multi-agent, Apps, Plugins, view-image, and every MCP server visible in the effective Codex configuration. Developer instructions restrict remaining action requests to the `dsh` namespace and distinguish the DSH Skill loader from Codex host skills. A DSH `skill` call may use only names advertised by the DSH skill catalog; native Codex image generation is invoked directly instead of attempting to load `imagegen` from DSH. Command, file-change, and permission approval requests fail closed if App Server still emits one.
 
 Native image generation remains enabled intentionally. Its completed image item is persisted through the DSH attachment service and exposed as an assistant image without entering the DSH tool loop. MCP elicitation is declined, and unimplemented interactive user input fails explicitly.
 

@@ -9,6 +9,7 @@ import {
   createToolResultMessage,
   createUserMessage,
   type GenerateOptions,
+  type ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
@@ -34,6 +35,17 @@ const pixelRef: ImageAttachmentRef = {
   width: 1,
   height: 1,
   name: 'pixel.png',
+}
+
+const dshSkillTool: ToolSchema = {
+  name: 'skill',
+  description: 'Load the full instructions for an available DSH skill.',
+  parameters: {
+    type: 'object',
+    properties: { name: { type: 'string' } },
+    required: ['name'],
+    additionalProperties: false,
+  },
 }
 
 const config: AdapterConfig = {
@@ -129,15 +141,25 @@ it.skipIf(!runImageGenerationLive)('returns a real App Server image generation a
   for await (const chunk of adapter.stream({
     provider: CODEX_APP_SERVER_PROVIDER,
     model: model!.id,
-    messages: [createUserMessage({
-      source: { kind: 'user' },
-      content: [{
-        type: 'text',
-        text: 'Use the image generation tool to create a simple solid red square with no text.',
-      }],
-    })],
+    messages: [
+      createUserMessage({
+        source: { kind: 'plugin', plugin: 'dsh-skill-catalog' },
+        content: [{
+          type: 'text',
+          text: '<system-reminder><available_skills><skill>chrome-devtools</skill></available_skills> Call the DSH skill tool only with an exact name from this catalog.</system-reminder>',
+        }],
+      }),
+      createUserMessage({
+        source: { kind: 'user' },
+        content: [{
+          type: 'text',
+          text: 'Use Codex native image generation to create a simple solid red square with no text.',
+        }],
+      }),
+    ],
     system: 'Follow the user request and use image generation.',
     sessionId,
+    tools: [dshSkillTool],
   })) assembled.push(chunk)
 
   expect(assembled.finish.kind).toBe('stop')
